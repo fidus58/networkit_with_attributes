@@ -11,12 +11,18 @@
 #define NETWORKIT_GRAPH_GRAPH_HPP_
 
 #include <algorithm>
+#include <fstream>
 #include <functional>
+#include <iostream>
+#include <memory>
 #include <numeric>
 #include <omp.h>
 #include <queue>
+#include <sstream>
 #include <stack>
 #include <stdexcept>
+#include <typeindex>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -139,6 +145,390 @@ class Graph final {
     //!< same schema (and same order!) as outEdges
     std::vector<std::vector<edgeid>> outEdgeIds;
 
+private:
+    // user attributes of this graph (node attributes so far)
+    // Base class for all node attributes.
+    class NodeAttributeStorageBase {
+    public:
+        NodeAttributeStorageBase(const Graph *graph, std::string name, std::type_index type)
+            : name{name}, type{type}, theGraph{graph} {}
+
+        virtual ~NodeAttributeStorageBase() = default;
+
+        virtual void invalidateAttributes() = 0;
+
+        std::string getName() { return name; }
+
+        std::type_index getType() { return type; }
+
+        bool isValid(index i) { return i < valid.size() && valid[i]; }
+
+        // Called by Graph when node is deleted.
+        void invalidate(index i) {
+            if (isValid(i)) {
+                valid[i] = false;
+                --validElements;
+            }
+        }
+
+    protected:
+        void markValid(index i) {
+            if (!theGraph->hasNode(i)) {
+                throw std::runtime_error("This node does not exist");
+            }
+            if (i >= valid.size()) {
+                valid.resize(i + 1);
+            }
+            valid[i] = true;
+            ++validElements;
+        }
+
+        void checkIndex(index i) {
+            if (!theGraph->hasNode(i)) {
+                throw std::runtime_error("This node does not exist");
+            }
+            if (!isValid(i)) {
+                throw std::runtime_error("Invalid attribute value");
+            }
+        }
+
+    public:
+    private:
+        std::string name;
+        std::type_index type;
+        std::vector<bool> valid; // For each node: whether attribute is set or not.
+    protected:
+        index validElements = 0;
+        const Graph *theGraph;
+    }; // class NodeAttributeStorageBase
+
+    template <typename T>
+    class NodeAttribute;
+
+    template <typename T>
+    class NodeAttributeStorage : public Graph::NodeAttributeStorageBase {
+    public:
+        NodeAttributeStorage(const Graph *theGraph, std::string name)
+            : NodeAttributeStorageBase{theGraph, std::move(name), typeid(T)} {}
+
+        ~NodeAttributeStorage() override { invalidateAttributes(); }
+
+        void invalidateAttributes() override {
+            for (auto att : attrSet)
+                att->invalidateAttribute();
+        }
+
+        void resize(index i) {
+            if (i >= values.size()) {
+                values.resize(i + 1);
+            }
+        }
+
+        auto size() { return validElements; }
+
+        void set(index i, T v) {
+            markValid(i);
+            resize(i);
+            values[i] = std::move(v);
+        }
+
+        // instead of returning an std::optional (C++17) we provide these
+        // C++14 options
+        // (1) throw an exception when invalid:
+        T get(index i) { // may throw
+            checkIndex(i);
+            return values[i];
+        }
+
+        // (2) give default value when invalid:
+        T get(index i, T defaultT) {
+            if (i >= values.size() || !isValid(i)) {
+                return defaultT;
+            }
+            return values[i];
+        }
+
+    private:
+        using NodeAttributeStorageBase::theGraph;
+        std::vector<T> values;
+        friend class NodeAttribute<T>;
+        std::unordered_set<NodeAttribute<T> *> attrSet;
+    }; // class NodeAttributeStorage<T>
+
+    template <typename T>
+    class NodeAttribute {
+    public:
+        class Iterator {
+        public:
+            // The value type of the nodes (i.e. nodes). Returned by
+            // operator*().
+            using value_type = T;
+
+            // Reference to the value_type, required by STL.
+            using reference = value_type &;
+
+            // Pointer to the value_type, required by STL.
+            using pointer = value_type *;
+
+            // STL iterator category.
+            using iterator_category = std::forward_iterator_tag;
+
+            // Signed integer type of the result of subtracting two pointers,
+            // required by STL.
+            using difference_type = ptrdiff_t;
+
+            Iterator() : storage{nullptr}, idx{0} { }
+            Iterator(NodeAttributeStorage<T> *storage) : storage{storage}, idx{0} {
+                if (storage) {
+                    nextValid();
+                }
+            }
+
+            Iterator &nextValid() {
+                while (storage && !storage->isValid(idx)) {
+                    if (idx >= storage->values.size()) {
+                        storage = nullptr;
+                        return *this;
+                    }
+                    ++idx;
+                }
+                return *this;
+            }
+
+            Iterator &operator++() {
+                if (!storage) {
+                    throw std::runtime_error("Invalid attribute iterator");
+                }
+                ++idx;
+                return nextValid();
+            }
+
+            auto operator*() {
+                if (!storage) {
+                    throw std::runtime_error("Invalid attribute iterator");
+                }
+                return std::make_pair(idx, storage->values[idx]);
+            }
+
+            //          auto nodeValuePair() { return std::make_pair(idx, **this); }
+
+            bool operator==(Iterator const &iter) {
+                if (storage == nullptr && iter.storage == nullptr) {
+                    return true;
+                }
+                return storage == iter.storage && idx == iter.idx;
+            }
+
+            bool operator!=(Iterator const &iter) { return !(*this == iter); }
+
+        private:
+            NodeAttributeStorage<T> *storage;
+            index idx;
+        }; // class Iterator
+    private:
+        class IndexProxy {
+        public:
+            IndexProxy(NodeAttributeStorage<T> *storage, index idx) : storage{storage}, idx{idx} {}
+
+            // reading at idx
+            operator T() {
+                storage->checkIndex(idx);
+                return storage->values[idx];
+            }
+
+            // writing at idx
+            T &operator=(T const &other) {
+                storage->set(idx, std::move(other));
+                return storage->values[idx];
+            }
+
+        private:
+            NodeAttributeStorage<T> *storage;
+            index idx;
+        }; // class IndexProxy
+    public:
+        explicit NodeAttribute(std::shared_ptr<NodeAttributeStorage<T>> owned_storage = nullptr)
+            : owned_storage{owned_storage}, valid{owned_storage != nullptr} {
+            if (valid)
+                owned_storage->attrSet.insert(this);
+        }
+
+        NodeAttribute(NodeAttribute const &other)
+            : owned_storage{other.owned_storage}, valid{other.valid} {
+            if (valid)
+                owned_storage->attrSet.insert(this);
+        }
+
+        NodeAttribute &operator=(NodeAttribute other) {
+            this->swap(other);
+            return *this;
+        }
+
+        void swap(NodeAttribute &other) {
+            std::swap(owned_storage, other.owned_storage);
+            std::swap(valid, other.valid);
+        }
+
+        NodeAttribute(NodeAttribute &&other)
+            : owned_storage{std::move(other.owned_storage)}, valid{other.valid} {
+            other.valid = false;
+            if (valid)
+                owned_storage->attrSet.insert(this);
+        }
+
+        ~NodeAttribute() {
+            if (owned_storage) {
+                owned_storage->attrSet.erase(this);
+            }
+        }
+
+        auto begin() { return Iterator(owned_storage.get()).nextValid(); }
+
+        auto end() { return Iterator(nullptr); }
+
+        auto size() { return owned_storage->size(); }
+
+        void set(index i, T v) {
+            checkAttribute();
+            owned_storage->set(i, std::move(v));
+        }
+
+        auto get(index i) {
+            checkAttribute();
+            return owned_storage->get(i);
+        }
+
+        auto get(index i, T defaultT) {
+            checkAttribute();
+            return owned_storage->get(i, defaultT);
+        }
+
+        IndexProxy operator[](index i) {
+            checkAttribute();
+            return IndexProxy(owned_storage.get(), i);
+        }
+
+        void checkAttribute() {
+            if (!valid) {
+                throw std::runtime_error("Invalid attribute");
+            }
+        }
+
+        void write(std::string filename) {
+            std::ofstream out(filename);
+            if (!out)
+                std::cerr << "cannot open '" << filename << "' for writing\n";
+
+            for (auto it = begin(); it != end(); ++it) {
+                auto pair = *it;
+                auto n = pair.first;
+                auto v = pair.second;
+                out << n << "\t" << v << "\n";
+            }
+            out.close();
+        }
+
+        void read(std::string filename) {
+            std::ifstream in(filename);
+            if (!in) {
+                std::cerr << "cannot open '" << filename << "' for reading\n";
+            }
+            while (true) {
+                int n;
+                T t;
+                std::string line;
+                std::getline(in, line);
+                if (!in)
+                    break;
+                std::istringstream istring(line);
+                istring >> n >> t;
+                std::cout << "got: " << n << " " << t << "\n";
+            }
+        }
+
+    private:
+        void invalidateAttribute() { valid = false; }
+
+    private:
+        std::shared_ptr<NodeAttributeStorage<T>> owned_storage;
+        bool valid;
+        friend NodeAttributeStorage<T>;
+    }; // class NodeAttribute
+
+    class NodeAttributeMap {
+	friend Graph;
+        const Graph *theGraph;
+
+    public:
+        std::unordered_map<std::string, std::shared_ptr<NodeAttributeStorageBase>> attrMap;
+
+        NodeAttributeMap(const Graph *g) : theGraph{g} {}
+
+        auto find(std::string const &name) {
+            auto it = attrMap.find(name);
+            if (it == attrMap.end()) {
+                throw std::runtime_error("No such attribute");
+            }
+            return it;
+        }
+
+        template <typename T>
+        auto attach(std::string name) {
+            auto ownedPtr = std::make_shared<NodeAttributeStorage<T>>(theGraph, std::string{name});
+            auto insertResult = attrMap.insert(std::make_pair(ownedPtr->getName(), ownedPtr));
+            auto success = insertResult.second;
+            if (!success) {
+                throw std::runtime_error("Attribute with same name already exists");
+            }
+            return NodeAttribute<T>{ownedPtr};
+        }
+
+        void detach(std::string name) {
+            auto it = find(name);
+            auto storage = it->second.get();
+            storage->invalidateAttributes();
+            it->second.reset();
+            attrMap.erase(name);
+        }
+
+        template <typename T>
+        auto get(std::string name) {
+            auto it = find(name);
+            if (it->second.get()->getType() != typeid(T))
+                throw std::runtime_error("Type mismatch in nodeAttributes().get()");
+            return NodeAttribute<T>{std::static_pointer_cast<NodeAttributeStorage<T>>(it->second)};
+        }
+
+    }; // class NodeAttributeMap
+    NodeAttributeMap nodeAttributeMap;
+
+public:
+    auto &nodeAttributes() { return nodeAttributeMap; }
+
+    // wrap up some typed attributes for the cython interface:
+    //
+    auto attachNodeIntAttribute(std::string name) {
+        nodeAttributes().theGraph = this;
+        return nodeAttributes().attach<int>(name);
+    }
+
+    auto attachNodeDoubleAttribute(std::string name) {
+        nodeAttributes().theGraph = this;
+        return nodeAttributes().attach<double>(name);
+    }
+
+    auto attachNodeStringAttribute(std::string name) {
+        nodeAttributes().theGraph = this;
+        return nodeAttributes().attach<std::string>(name);
+    }
+
+    void detach(std::string name) { nodeAttributes().detach(name); }
+
+    // using NodeStringAttribute = NodeAttribute<std::string>;
+    using NodeIntAttribute = NodeAttribute<int>;
+    // using NodeDoubleAttribute = NodeAttribute<double>;
+
+private:
     /**
      * Returns the index of node u in the array of incoming edges of node v.
      * (for directed graphs inEdges is searched, while for indirected outEdges

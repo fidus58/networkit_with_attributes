@@ -95,6 +95,8 @@ cdef extern from "<networkit/graph/Graph.hpp>":
 		_InNeighborRange inNeighborRange(node u) except +
 		_OutNeighborWeightRange weightNeighborRange(node u) except +
 		_InNeighborWeightRange weightInNeighborRange(node u) except +
+		_NodeAttribute attachNodeIntAttribute(string) except +
+		void detach(string) except +
 
 cdef extern from "<networkit/graph/Graph.hpp>":
 	cdef cppclass _NodeIterator "NetworKit::Graph::NodeIterator":
@@ -166,9 +168,31 @@ cdef extern from "<networkit/graph/Graph.hpp>":
 		_NeighborWeightIterator begin() except +
 		_NeighborWeightIterator end() except +
 
+cdef extern from "<networkit/graph/Graph.hpp>":
+	cdef cppclass _NodeAttribute "NetworKit::Graph::NodeIntAttribute":
+		cppclass _AttributeIterator "Iterator":
+			_AttributeIterator operator++()
+			pair[node, int] operator*()
+			bool_t operator==(const _AttributeIterator)
+			bool_t operator!=(const _AttributeIterator)
+		_AttributeIterator begin()
+		_AttributeIterator end()
+		index size()
+		void set(index, int) except +
+		int get(index) except +
+		int get(index, int) except +
+		void swap(_NodeAttribute& other)
+
 cdef class Graph:
 	cdef _Graph _this
 	cdef setThis(self, _Graph& other)
+
+cdef class NodeAttribute:
+	cdef _NodeAttribute _this
+	cdef _NodeAttribute._AttributeIterator _iter
+	cdef _NodeAttribute._AttributeIterator _stopiter
+	cdef _Graph* _G
+	cdef setThis(self, _NodeAttribute& other, _Graph* graph)
 
 cdef extern from "<networkit/graph/SpanningForest.hpp>":
 

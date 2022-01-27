@@ -37,14 +37,12 @@ Graph::Graph(count n, bool weighted, bool directed)
       outgoing edges, for undirected graphs outEdges stores the adjacency list of
       undirected edges*/
       outEdges(n), inEdgeWeights(weighted && directed ? n : 0), outEdgeWeights(weighted ? n : 0),
-      inEdgeIds(), outEdgeIds() {}
+      inEdgeIds(), outEdgeIds(), nodeAttributeMap(this) {}
 
 Graph::Graph(std::initializer_list<WeightedEdge> edges) : Graph(0, true) {
-    using namespace std;
-
     /* Number of nodes = highest node index + 1 */
     for (const auto &edge : edges) {
-        node x = max(edge.u, edge.v);
+        node x = std::max(edge.u, edge.v);
         while (numberOfNodes() <= x) {
             addNode();
         }
@@ -60,11 +58,9 @@ Graph::Graph(const Graph &G, bool weighted, bool directed)
     : n(G.n), m(G.m), storedNumberOfSelfLoops(G.storedNumberOfSelfLoops), z(G.z), omega(0), t(G.t),
       weighted(weighted), directed(directed),
       edgesIndexed(false), // edges are not indexed by default
-      exists(G.exists),
-
+      exists(G.exists), nodeAttributeMap(this),
       // let the following be empty for the start, we fill them later
       inEdges(0), outEdges(0), inEdgeWeights(0), outEdgeWeights(0) {
-
     if (G.isDirected() == directed) {
         // G.inEdges might be empty (if G is undirected), but
         // that's fine
@@ -535,6 +531,13 @@ void Graph::removeNode(node v) {
         while (!inEdges[v].empty())
             removeEdge(inEdges[v].front(), v);
 
+    // Make the attributes of this node invalid
+    auto &theMap = nodeAttributeMap.attrMap;
+    for (auto it = theMap.begin(); it != theMap.end(); ++it) {
+        auto attributeStorageBase = it->second.get();
+        attributeStorageBase->invalidate(v);
+    }
+
     exists[v] = false;
     n--;
 }
@@ -959,5 +962,11 @@ bool Graph::checkConsistency() const {
 
     return noMultiEdges && correctNodeUpperbound && correctNumberOfEdges;
 }
+
+/** NODE ATTRIBUTE INSTANTIATION FOR STRINGS **/
+/** (needed for Python Binding)                    **/
+
+template class Graph::NodeAttribute<std::string>;
+template class Graph::NodeAttributeStorage<std::string>;
 
 } /* namespace NetworKit */

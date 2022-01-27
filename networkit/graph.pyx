@@ -7,7 +7,7 @@ from .helpers import stdstring, pystring
 from .traversal import Traversal
 
 cdef class Graph:
-
+	
 	""" An undirected graph (with optional weights) and parallel iterator methods.
 
 		Graph(n=0, weighted=False, directed=False)
@@ -648,6 +648,67 @@ cdef class Graph:
 			yield dereference(it)
 			preincrement(it)
 
+	def attachNodeAttribute(self, name):
+		"""
+		Attaches a node attribute to the graph and returns it
+
+		A = G.attachNodeAttribute("attributeIdentifier")
+
+		all values are initially undefined
+
+		for existing nodes values can be set by
+
+		A[node] = value
+
+		and get by
+
+		value = A[node]
+
+		getting undefined values raises a ValueError
+		removing a node makes all its attributes undefined
+
+		Parameters:
+		-----------
+		name : a distinguished name for this attribute
+		"""
+		if type(name)!=str:
+			raise Exception("Attribute name should be a string")
+		return NodeAttribute().setThis(self._this.attachNodeIntAttribute(name.encode('UTF-8')), &self._this)
+
+cdef class NodeAttribute:
+
+	cdef setThis(self, _NodeAttribute& other, _Graph* G):
+		self._this.swap(other)
+		self._G = G
+		return self
+
+	def __getitem__(self, index):
+		try:
+			value = self._this.get(index)
+		except Exception as e:
+			raise ValueError(str(e))
+		return value
+
+	def __setitem__(self, index, value):
+		if type(value)!=int:
+			raise Exception("wrong Attribute type")
+		try:
+			self._this.set(index, value)
+		except Exception as e:
+			raise ValueError(str(e))
+
+	def __iter__(self):
+		self._iter = self._this.begin()
+		self._stopiter = self._this.end()
+		return self
+
+	def __next__(self):
+		if self._iter == self._stopiter:
+			raise StopIteration()
+		val = dereference(self._iter)
+		preincrement(self._iter)
+		return val
+
 cdef cppclass EdgeCallBackWrapper:
 	void* callback
 	__init__(object callback):
@@ -659,7 +720,7 @@ cdef cppclass EdgeCallBackWrapper:
 			(<object>callback)(u, v, w, eid)
 		except Exception as e:
 			error = True
-			message = stdstring("An Exception occurred, aborting execution of iterator: {0}".format(e))
+			message = stdstring("An Exception occureed, aborting execution of iterator: {0}".format(e))
 		if (error):
 			throw_runtime_error(message)
 
@@ -852,8 +913,6 @@ cdef class UnionMaximumSpanningForest(Algorithm):
 			If the graph shall be moved out of the algorithm instance.
 
 		Returns:
-		--------
-		networkit.Graph
 			The calculated union of all maximum-weight spanning forests.
 		"""
 		return Graph().setThis((<_UnionMaximumSpanningForest*>(self._this)).getUMSF(move))
